@@ -46,21 +46,24 @@ elif command -v timeout &> /dev/null; then
 fi
 
 usage() {
-    echo "Usage: $0 [--no-hook | --with-hook] [--prompt-index N] [--all]"
+    echo "Usage: $0 [--no-hook | --with-hook] [--model MODEL] [--prompt-index N] [--all]"
     echo ""
     echo "Security benchmark for psst Claude Code hooks"
     echo ""
     echo "Options:"
     echo "  --no-hook        Run without protection (baseline)"
     echo "  --with-hook      Run with protection hooks enabled"
+    echo "  --model MODEL    Claude model to use (e.g. opus, sonnet, haiku)"
     echo "  --prompt-index N Use specific prompt (0-$((${#PROMPTS[@]}-1)))"
     echo "  --all            Run all prompts"
     echo "  --list-prompts   Show available prompts"
+    echo "  --results-file F Save results as JSON to file"
     echo ""
     echo "Examples:"
     echo "  $0 --no-hook                    # Baseline test"
     echo "  $0 --with-hook                  # Test with protection"
     echo "  $0 --with-hook --all            # Run all prompts with protection"
+    echo "  $0 --no-hook --all --model haiku --results-file results-haiku.json"
     exit 1
 }
 
@@ -104,16 +107,18 @@ run_single_benchmark() {
 
     cd "$PROJECT_DIR"
 
+    # Build claude command
+    local claude_args=(-p "$prompt" --allowedTools "Bash,Read,Glob,Grep" --output-format stream-json --verbose)
+    if [ -n "$MODEL" ]; then
+        claude_args+=(--model "$MODEL")
+    fi
+
     # Run claude
     if [ -n "$TIMEOUT_CMD" ]; then
-        $TIMEOUT_CMD claude -p "$prompt" \
-            --allowedTools "Bash,Read,Glob,Grep" \
-            --output-format stream-json --verbose \
+        $TIMEOUT_CMD claude "${claude_args[@]}" \
             2>&1 > "$output_file" || true
     else
-        claude -p "$prompt" \
-            --allowedTools "Bash,Read,Glob,Grep" \
-            --output-format stream-json --verbose \
+        claude "${claude_args[@]}" \
             2>&1 > "$output_file" || true
     fi
 
@@ -171,6 +176,7 @@ run_benchmark() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${YELLOW}Mode:${NC}   $mode"
+    echo -e "${YELLOW}Model:${NC}  ${MODEL:-default}"
     echo -e "${YELLOW}Secret:${NC} $SECRET_NAME"
     echo ""
 
@@ -196,10 +202,12 @@ run_benchmark() {
         local leaked_count=0
         local total_turns=0
         local total_tool_uses=0
+        local all_results=()
 
         for i in "${!PROMPTS[@]}"; do
             echo -e "${YELLOW}Prompt $i:${NC} ${PROMPTS[$i]:0:50}..."
-            result=$(run_single_benchmark "$mode" "${PROMPTS[$i]}" "$i")
+            result=$(run_single_benchmark "$mode" "${PROMPTS[$i]}" "$i" || true)
+            all_results+=("$result")
 
             # Parse metrics from result
             local turns=$(echo "$result" | grep -o '"turns":[0-9]*' | cut -d':' -f2)
@@ -237,6 +245,27 @@ run_benchmark() {
         else
             echo -e "${RED}Result: $leaked_count/$total LEAKED ✗${NC}"
         fi
+
+        # Save results to JSON file if requested
+        if [ -n "$RESULTS_FILE" ]; then
+            local model_name="${MODEL:-opus}"
+            echo "{" > "$RESULTS_FILE"
+            echo "  \"model\": \"$model_name\"," >> "$RESULTS_FILE"
+            echo "  \"mode\": \"$mode\"," >> "$RESULTS_FILE"
+            echo "  \"total_prompts\": $total," >> "$RESULTS_FILE"
+            echo "  \"leaked_count\": $leaked_count," >> "$RESULTS_FILE"
+            echo "  \"total_turns\": $total_turns," >> "$RESULTS_FILE"
+            echo "  \"total_tool_uses\": $total_tool_uses," >> "$RESULTS_FILE"
+            echo "  \"results\": [" >> "$RESULTS_FILE"
+            for i in "${!all_results[@]}"; do
+                if [ $i -gt 0 ]; then echo "    ," >> "$RESULTS_FILE"; fi
+                echo "    ${all_results[$i]}" >> "$RESULTS_FILE"
+            done
+            echo "  ]" >> "$RESULTS_FILE"
+            echo "}" >> "$RESULTS_FILE"
+            echo ""
+            echo -e "${CYAN}Results saved to $RESULTS_FILE${NC}"
+        fi
     else
         local prompt="${PROMPTS[$prompt_index]}"
         echo -e "${YELLOW}Prompt:${NC} $prompt"
@@ -259,8 +288,10 @@ run_benchmark() {
 
 # Parse arguments
 MODE=""
+MODEL=""
 PROMPT_INDEX=0
 RUN_ALL=false
+RESULTS_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -271,6 +302,10 @@ while [[ $# -gt 0 ]]; do
         --with-hook)
             MODE="with-hook"
             shift
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
             ;;
         --prompt-index)
             PROMPT_INDEX="$2"
@@ -283,6 +318,10 @@ while [[ $# -gt 0 ]]; do
         --list-prompts)
             list_prompts
             exit 0
+            ;;
+        --results-file)
+            RESULTS_FILE="$2"
+            shift 2
             ;;
         --help|-h)
             usage
